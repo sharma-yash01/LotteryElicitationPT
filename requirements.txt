@@ -1,0 +1,17 @@
+# ---- Core training stack (pinned for reproducibility) ----
+openenv-core[core]==0.2.*
+trl==1.0.0
+jmespath>=1.0.1
+transformers>=5.2.0
+datasets>=2.21
+accelerate>=1.2
+
+# ---- Inference / generation ----
+vllm>=0.10.2,<0.15
+
+# ---- Deep learning runtime ----
+torch==2.5.*
+numpy==1.26.*
+
+# ---- Data / config ----
+pydantic==2.10.*
