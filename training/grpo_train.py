@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import numpy as np
+import torch.distributed as dist
 
 from training.action_parser import parse_llm_output
 from training.config import TrainingRuntimeConfig
@@ -28,6 +29,9 @@ RUNTIME_CFG: TrainingRuntimeConfig | None = None
 REWARD_LOG_PATH: str = ""
 EPISODE_LOG_COUNT: int = 0
 LOG_LOCK = threading.Lock()
+
+# Align with LotteryElicitationEnv.env.config.EnvConfig.max_steps (remote hard cap).
+LOTTERY_ENV_MAX_STEPS = 10
 
 
 def _write_episode_log(entry: dict) -> None:
@@ -187,6 +191,28 @@ def _per_step_cap(trainer: "GRPOTrainer") -> int:
     return max(1, min(int(RUNTIME_CFG.max_tokens_per_step), global_max))
 
 
+def _needs_vllm_server_generate_padding(trainer: "GRPOTrainer") -> bool:
+    vg = getattr(trainer, "vllm_generation", None)
+    if vg is None or getattr(vg, "mode", None) != "server":
+        return False
+    if not dist.is_available() or not dist.is_initialized():
+        return False
+    return dist.get_world_size() > 1
+
+
+def _pad_vllm_server_generates_to_target(
+    trainer: "GRPOTrainer", *, before_ids: list[int], num_dummy: int
+) -> None:
+    """Cheap generate() calls for NCCL lockstep; outputs discarded."""
+    for _ in range(max(0, num_dummy)):
+        with _temporary_vllm_max_tokens(trainer, 1):
+            trainer.vllm_generation.generate(
+                prompts=[before_ids],
+                images=None,
+                num_generations=1,
+            )
+
+
 def _rollout_one_episode(
     seed_messages: list,
     trainer: "GRPOTrainer",
@@ -225,13 +251,16 @@ def _rollout_one_episode(
             add_generation_prompt=True,
         )
 
+        per_episode_generate_target = min(max_episode_turns, LOTTERY_ENV_MAX_STEPS)
+        last_before_ids = prompt_ids_fixed
+
         completion_ids: list[int] = []
         env_mask: list[int] = []
         logprob_seq: list[float] = []
         format_ok_count = 0
         turns = 0
 
-        while not session.done and turns < max_episode_turns:
+        while not session.done and turns < per_episode_generate_target:
             turns += 1
             step_cap = _per_step_cap(trainer)
             before_ids = _tokenize_messages(
@@ -242,6 +271,7 @@ def _rollout_one_episode(
                 tools=tools,
                 add_generation_prompt=True,
             )
+            last_before_ids = before_ids
 
             with _temporary_vllm_max_tokens(trainer, step_cap):
                 _, gen_ids_batch, logprobs_raw, _ = trainer.vllm_generation.generate(
@@ -291,6 +321,12 @@ def _rollout_one_episode(
             completion_ids.extend(suffix)
             env_mask.extend([0] * len(suffix))
             logprob_seq.extend([0.0] * len(suffix))
+
+        if _needs_vllm_server_generate_padding(trainer):
+            n_pad = max(0, per_episode_generate_target - turns)
+            _pad_vllm_server_generates_to_target(
+                trainer, before_ids=last_before_ids, num_dummy=n_pad
+            )
 
         format_score = format_ok_count / max(1, turns)
         return (
