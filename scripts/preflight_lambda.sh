@@ -4,7 +4,7 @@
 # Usage:
 #   export LEPT_ROOT=/home/ubuntu/LotteryElicitationPT
 #   export LEPT_VENV=/home/ubuntu/.venvs/lept-lambda
-#   export ENV_BASE_URL=http://127.0.0.1:8000
+#   export ENV_BASE_URL=http://127.0.0.1:9000
 #   export LEPT_FS_NAME=<lambda-filesystem-name>   # optional
 #   export LEPT_DATA_ROOT=/lambda/nfs/<fs-name>/lept  # optional override
 #   bash scripts/preflight_lambda.sh

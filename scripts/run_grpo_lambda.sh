@@ -4,13 +4,13 @@
 # Usage:
 #   export LEPT_ROOT=/home/ubuntu/LotteryElicitationPT
 #   export LEPT_VENV=/home/ubuntu/.venvs/lept-lambda
-#   export ENV_BASE_URL=http://127.0.0.1:8000
+#   export ENV_BASE_URL=http://127.0.0.1:9000
 #   export LEPT_FS_NAME=<lambda-filesystem-name>   # optional
 #   bash scripts/run_grpo_lambda.sh [--dry-run]
 #
 # Multi-GPU: LEPT_VLLM_MODE=auto picks server if >=2 visible GPUs else colocate.
 # Server mode: starts trl vllm-serve on LEPT_VLLM_PORT (default 8001), then accelerate launch
-# on the remaining GPUs (OpenEnv typically uses 8000 — do not collide).
+# on the remaining GPUs (LotteryElicitationEnv uses 9000 — do not collide).
 
 set -euo pipefail
 
@@ -39,7 +39,7 @@ usage() {
     echo "  LEPT_NUM_GPUS         default: auto (nvidia-smi count)"
     echo "  LEPT_VLLM_MODE        default: auto (server if >=2 GPUs, else colocate)"
     echo "  LEPT_VLLM_TP          default: 1 (vLLM tensor parallel GPUs in server mode)"
-    echo "  LEPT_VLLM_PORT        default: 8001 (trl vllm-serve HTTP; must differ from OpenEnv, often 8000)"
+    echo "  LEPT_VLLM_PORT        default: 8001 (trl vllm-serve HTTP; must differ from OpenEnv, LotteryElicitationEnv uses 9000)"
     echo "  LEPT_VLLM_GROUP_PORT  default: 51216 (TRL weight-sync TCP; match training --vllm_group_port)"
     echo "  LEPT_VLLM_SERVER_HOST default: 127.0.0.1 (passed to grpo_train --vllm_server_host)"
     echo "  LEPT_NCCL_P2P_DISABLE optional: if set, overrides NCCL_P2P_DISABLE for multi-GPU (else 1; use 0 on NVLink A100)"

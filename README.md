@@ -21,7 +21,7 @@ pip install -r requirements.txt  # or requirements.lambda.txt on GPU images
 Point `ENV_BASE_URL` at your OpenEnv base URL (same host/port as the FastAPI app, no trailing path).
 
 ```bash
-export ENV_BASE_URL=http://127.0.0.1:8000
+export ENV_BASE_URL=http://127.0.0.1:9000
 python -m training.grpo_train \
   --model Qwen/Qwen3-0.6B \
   --env_base_url "$ENV_BASE_URL" \
