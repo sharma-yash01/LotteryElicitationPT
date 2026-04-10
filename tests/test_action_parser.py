@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from training.action_parser import parse_llm_output
+from training.action_parser import _normalize_lottery_probabilities, parse_llm_output
 
 _BASE_OBS = {
     "step_idx": 0,
@@ -100,6 +100,55 @@ class TestActionParser(unittest.TestCase):
         text = json.dumps({"lottery_a": bad, "lottery_b": _LOT})
         _, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
         self.assertFalse(ok)
+
+    def test_probabilities_sum_exactly_one_after_parse(self):
+        """Borderline sums pass _valid_lottery (1e-3) but must normalize for env (1e-6)."""
+        lot = {
+            "outcomes": [
+                {"value": 1.0, "probability": 0.3333},
+                {"value": 2.0, "probability": 0.3333},
+                {"value": 3.0, "probability": 0.3334},
+            ]
+        }
+        text = json.dumps({"lottery_a": lot, "lottery_b": _LOT})
+        action, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertTrue(ok)
+        for key in ("lottery_a", "lottery_b"):
+            probs = [o["probability"] for o in action[key]["outcomes"]]
+            self.assertAlmostEqual(sum(probs), 1.0, places=12)
+
+    def test_normalize_lottery_two_outcomes_remainder(self):
+        n = _normalize_lottery_probabilities({
+            "outcomes": [
+                {"value": 0.0, "probability": 0.41},
+                {"value": 1.0, "probability": 0.59},
+            ]
+        })
+        self.assertEqual(sum(o["probability"] for o in n["outcomes"]), 1.0)
+
+    def test_fallback_lotteries_sum_to_one(self):
+        action, ok = parse_llm_output("not json", _BASE_OBS, rng=np.random.default_rng(123))
+        self.assertFalse(ok)
+        for key in ("lottery_a", "lottery_b"):
+            probs = [o["probability"] for o in action[key]["outcomes"]]
+            self.assertEqual(sum(probs), 1.0)
+
+
+    def test_think_block_before_json_stripped(self):
+        """Qwen3 think block before valid JSON should parse correctly."""
+        think_prefix = "<think>\nLet me reason about this lottery elicitation...\n</think>\n"
+        text = think_prefix + _valid_payload()
+        action, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertTrue(ok)
+        self.assertIn("lottery_a", action)
+        self.assertIn("lottery_b", action)
+
+    def test_redacted_thinking_before_json_stripped(self):
+        """<redacted_thinking> wrapper before valid JSON should parse correctly."""
+        text = "<redacted_thinking>some reasoning</redacted_thinking>\n" + _valid_payload()
+        action, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertTrue(ok)
+        self.assertIn("lottery_a", action)
 
 
 if __name__ == "__main__":

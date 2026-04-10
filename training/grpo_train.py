@@ -24,6 +24,23 @@ from training.prompts import format_observation_prompt, system_prompt_from_obser
 if TYPE_CHECKING:
     from trl import GRPOTrainer
 
+def _merge_chat_template_kwargs_for_reasoning_mode(
+    base: dict,
+    *,
+    reasoning_mode: str,
+) -> dict:
+    """Override enable_thinking when reasoning_mode is on/off; auto leaves base unchanged."""
+    mode = (reasoning_mode or "auto").strip().lower()
+    out = dict(base)
+    if mode == "on":
+        out["enable_thinking"] = True
+    elif mode == "off":
+        out["enable_thinking"] = False
+    elif mode != "auto":
+        raise ValueError(f"reasoning_mode must be auto, on, or off (got {reasoning_mode!r})")
+    return out
+
+
 ENV_BASE_URL: str = ""
 RUNTIME_CFG: TrainingRuntimeConfig | None = None
 REWARD_LOG_PATH: str = ""
@@ -148,16 +165,30 @@ def _tokenize_messages(
     tools,
     add_generation_prompt: bool,
 ) -> list[int]:
-    tokenized = tokenizer.apply_chat_template(
-        conversation=[messages],
-        tools=tools,
-        chat_template=chat_template,
-        add_generation_prompt=add_generation_prompt,
-        tokenize=True,
-        return_dict=True,
-        padding=True,
-        **chat_template_kwargs,
-    )
+    try:
+        tokenized = tokenizer.apply_chat_template(
+            conversation=[messages],
+            tools=tools,
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            return_dict=True,
+            padding=True,
+            **chat_template_kwargs,
+        )
+    except TypeError:
+        # Tokenizer does not support enable_thinking (non-Qwen model); retry without it.
+        kwargs_no_thinking = {k: v for k, v in chat_template_kwargs.items() if k != "enable_thinking"}
+        tokenized = tokenizer.apply_chat_template(
+            conversation=[messages],
+            tools=tools,
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=True,
+            return_dict=True,
+            padding=True,
+            **kwargs_no_thinking,
+        )
     row_ids = tokenized["input_ids"][0]
     row_mask = tokenized["attention_mask"][0]
     return [int(t) for t, m in zip(row_ids, row_mask, strict=True) if m]
@@ -436,6 +467,13 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=5e-7)
     parser.add_argument("--env_base_url", type=str, default=None)
     parser.add_argument("--space_url", type=str, default=None)
+    parser.add_argument(
+        "--reasoning_mode",
+        type=str,
+        default="off",
+        choices=["auto", "on", "off"],
+        help="Chat-template enable_thinking: off disables Qwen3 think blocks (default); on forces them; auto leaves base unchanged.",
+    )
     args = parser.parse_args()
 
     if args.per_device_train_batch_size % args.num_generations != 0:
@@ -481,9 +519,16 @@ def main():
         * 100
     })
 
+    merged_chat_template_kwargs = _merge_chat_template_kwargs_for_reasoning_mode(
+        {},
+        reasoning_mode=args.reasoning_mode,
+    )
+    print(f"Reasoning mode: {args.reasoning_mode!r}  chat_template_kwargs={merged_chat_template_kwargs!r}")
+
     grpo_config = GRPOConfig(
         output_dir=args.output_dir,
         use_vllm=True,
+        chat_template_kwargs=merged_chat_template_kwargs,
         vllm_mode=args.vllm_mode,
         vllm_tensor_parallel_size=args.vllm_tensor_parallel_size,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,

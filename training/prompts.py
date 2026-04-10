@@ -23,7 +23,7 @@ On each turn, you present a pair of lotteries and observe which one the responde
 Your goal: infer their risk sensitivity gamma (γ ∈ [{gamma_lo}, {gamma_hi}]).
 The respondent's loss aversion λ is fixed at {LAMBDA_FIXED_STAGE1} for this session (within [{lambda_lo}, {lambda_hi}]).
 
-Each turn, respond with ONLY a JSON object:
+Each turn, respond with ONLY a JSON object defining the two lotteries so the respondent can choose between them:
 {{
   "lottery_a": {{"outcomes": [{{"value": <float>, "probability": <float>}}, ...]}},
   "lottery_b": {{"outcomes": [{{"value": <float>, "probability": <float>}}, ...]}}

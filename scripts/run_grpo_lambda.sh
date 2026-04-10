@@ -56,6 +56,7 @@ usage() {
     echo "  LEPT_INSTALL_DEPS_ON_RUN  default: 0 (set to 1 to pip install before run)"
     echo "  LEPT_REQUIREMENTS_FILE    default: <LEPT_ROOT>/requirements.lambda.txt"
     echo "  PYTORCH_WHEEL_INDEX       optional pip extra index URL"
+    echo "  LEPT_REASONING_MODE       default: off (disables Qwen3 think blocks; set to on or auto to enable)"
     exit 1
 }
 
@@ -108,6 +109,7 @@ LEPT_LOG_EVERY="${LEPT_LOG_EVERY:-1}"
 LEPT_INSTALL_DEPS_ON_RUN="${LEPT_INSTALL_DEPS_ON_RUN:-0}"
 LEPT_REQUIREMENTS_FILE="${LEPT_REQUIREMENTS_FILE:-$LEPT_ROOT/requirements.lambda.txt}"
 PYTORCH_WHEEL_INDEX="${PYTORCH_WHEEL_INDEX:-}"
+LEPT_REASONING_MODE="${LEPT_REASONING_MODE:-off}"
 
 # ---- GPU fleet & vLLM mode (respects CUDA_VISIBLE_DEVICES via nvidia-smi) ----
 if [[ "$LEPT_VLLM_MODE" != "auto" && "$LEPT_VLLM_MODE" != "server" && "$LEPT_VLLM_MODE" != "colocate" ]]; then
@@ -346,6 +348,7 @@ COMMON_ARGS=(
     --vllm_group_port "$LEPT_VLLM_GROUP_PORT"
     --max_completion_length "$LEPT_MAX_COMPLETION_LENGTH"
     --output_dir "$LEPT_OUTPUT_DIR"
+    --reasoning_mode "$LEPT_REASONING_MODE"
 )
 if [[ "${LEPT_NO_FORMAT_REWARD}" == "1" ]]; then
     COMMON_ARGS+=(--no_format_reward)

@@ -11,6 +11,30 @@ import numpy as np
 _PROB_SUM_TOL = 1e-3
 
 
+def _normalize_lottery_probabilities(lot: dict[str, Any]) -> dict[str, Any]:
+    """Renormalize outcome probabilities to sum to exactly 1.0 (server Pydantic uses 1e-6)."""
+    outcomes = lot["outcomes"]
+    total = sum(float(o["probability"]) for o in outcomes)
+    if total <= 0.0:
+        return {
+            "outcomes": [
+                {"value": float(o["value"]), "probability": float(o["probability"])}
+                for o in outcomes
+            ]
+        }
+    n = len(outcomes)
+    new_outcomes: list[dict[str, Any]] = []
+    acc = 0.0
+    for i, o in enumerate(outcomes):
+        if i == n - 1:
+            p = 1.0 - acc
+        else:
+            p = float(o["probability"]) / total
+            acc += p
+        new_outcomes.append({"value": float(o["value"]), "probability": p})
+    return {"outcomes": new_outcomes}
+
+
 def _normalize_ranges(obs: dict) -> tuple[tuple[float, float], tuple[float, float]]:
     def pair(key: str, default: tuple[float, float]) -> tuple[float, float]:
         v = obs.get(key)
@@ -37,12 +61,12 @@ def _random_fallback_action(obs: dict, rng: np.random.Generator | None) -> dict[
         p = float(rng.uniform(0.1, 0.9))
         v1 = float(rng.uniform(lo, hi))
         v2 = float(rng.uniform(lo, hi))
-        return {
+        return _normalize_lottery_probabilities({
             "outcomes": [
                 {"value": round(v1, 2), "probability": round(p, 4)},
                 {"value": round(v2, 2), "probability": round(1.0 - p, 4)},
             ]
-        }
+        })
 
     action: dict[str, Any] = {
         "lottery_a": _random_lottery(),
@@ -55,6 +79,15 @@ def _random_fallback_action(obs: dict, rng: np.random.Generator | None) -> dict[
             "lambda": (lambda_range[0] + lambda_range[1]) / 2,
         }
     return action
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove Qwen3-style <think>...</think> blocks (and redacted variants) before JSON extraction."""
+    # Qwen3 hybrid thinking delimiters
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL)
+    # Log-style redaction wrappers
+    text = re.sub(r"<redacted_thinking>[\s\S]*?</redacted_thinking>", "", text, flags=re.DOTALL)
+    return text
 
 
 def _strip_json_fences(text: str) -> str:
@@ -154,7 +187,8 @@ def parse_llm_output(
     rng: np.random.Generator | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Parse LLM text → action dict for env.step(); second value is parse validity."""
-    stripped = _strip_json_fences(text)
+    stripped = _strip_think_blocks(text)
+    stripped = _strip_json_fences(stripped)
     blob = _extract_first_json_object(stripped)
     if blob is None:
         return _random_fallback_action(obs, rng), False
@@ -171,9 +205,12 @@ def parse_llm_output(
     if not _valid_lottery(la, v_lo=v_lo, v_hi=v_hi) or not _valid_lottery(lb, v_lo=v_lo, v_hi=v_hi):
         return _random_fallback_action(obs, rng), False
 
+    la_n = _normalize_lottery_probabilities(la)
+    lb_n = _normalize_lottery_probabilities(lb)
+
     action: dict[str, Any] = {
-        "lottery_a": la,
-        "lottery_b": lb,
+        "lottery_a": la_n,
+        "lottery_b": lb_n,
     }
     if "theta_estimate" in data and isinstance(data["theta_estimate"], dict):
         te = data["theta_estimate"]
