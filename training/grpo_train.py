@@ -369,11 +369,11 @@ def _rollout_one_episode(
 
         # Hard-cap total completion length to max_completion_length so TRL
         # training tensors stay within GPU memory budget (OOM fix #1).
-        # max_total = int(trainer.args.max_completion_length)
-        # if len(completion_ids) > max_total:
-        #     completion_ids = completion_ids[:max_total]
-        #     env_mask = env_mask[:max_total]
-        #     logprob_seq = logprob_seq[:max_total]
+        max_total = int(trainer.args.max_completion_length)
+        if len(completion_ids) > max_total:
+            completion_ids = completion_ids[:max_total]
+            env_mask = env_mask[:max_total]
+            logprob_seq = logprob_seq[:max_total]
 
         format_score = format_ok_count / max(1, turns)
         return (
