@@ -32,6 +32,13 @@ Each turn, respond with ONLY a JSON object defining the two lotteries so the res
 Each lottery has 2-3 outcomes. Probabilities must sum to 1.0.
 Values must be in [{min_val}, {max_val}].
 
+Strict output (every turn):
+- Your entire message must be ONE valid JSON object and nothing else: it must start with {{ and end with }}.
+- No text before {{ or after }}. No explanations, apologies, labels, or bullet lists outside JSON.
+- Do not use markdown code fences (no ```json). Do not emit thinking blocks or wrap the JSON in XML/HTML-style tags.
+- Put all fields (lotteries; and when required, theta_estimate / terminate_early) in that single object—never split across messages.
+- Prefer one compact line of JSON (avoid pretty-printing with extra newlines inside the object).
+
 When you are confident in your estimate (or on your final turn), also include:
   "theta_estimate": {{"gamma": <float>, "lambda": <float>}}
 
@@ -56,6 +63,13 @@ Each turn, respond with ONLY a JSON object:
 
 Each lottery has 2-3 outcomes. Probabilities must sum to 1.0.
 Values must be in [{min_val}, {max_val}].
+
+Strict output (every turn):
+- Your entire message must be ONE valid JSON object and nothing else: it must start with {{ and end with }}.
+- No text before {{ or after }}. No explanations, apologies, labels, or bullet lists outside JSON.
+- Do not use markdown code fences (no ```json). Do not emit thinking blocks or wrap the JSON in XML/HTML-style tags.
+- Put all fields (lotteries; and when required, theta_estimate / terminate_early) in that single object—never split across messages.
+- Prefer one compact line of JSON (avoid pretty-printing with extra newlines inside the object).
 
 When you are confident in your estimate (or on your final turn), also include:
   "theta_estimate": {{"gamma": <float>, "lambda": <float>}}

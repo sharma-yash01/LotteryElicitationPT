@@ -14,6 +14,9 @@
 
 set -euo pipefail
 
+# Reduce CUDA allocator fragmentation (OOM fix #2 — free, pure upside).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 DRY_RUN=0
 
 usage() {
@@ -45,8 +48,9 @@ usage() {
     echo "  LEPT_NCCL_P2P_DISABLE optional: if set, overrides NCCL_P2P_DISABLE for multi-GPU (else 1; use 0 on NVLink A100)"
     echo "  LEPT_VLLM_GPU_UTIL    default: 0.9"
     echo "  LEPT_GRADIENT_CHECKPOINTING  default: 1"
-    echo "  LEPT_MAX_COMPLETION_LENGTH   default: 2048"
+    echo "  LEPT_MAX_COMPLETION_LENGTH   default: 512"
     echo "  LEPT_MAX_TOKENS_PER_STEP   default: 512"
+    echo "  LEPT_MAX_EPISODE_TURNS     default: 5 (max env steps per episode; raise to 7-8 for stage 2)"
     echo "  LEPT_CURRICULUM_STAGE      default: 1"
     echo "  LEPT_FORMAT_WEIGHT         default: 0.1 (set LEPT_NO_FORMAT_REWARD=1 for --no_format_reward)"
     echo "  LEPT_NO_BF16          default: 0 (set to 1 for --no_bf16)"
@@ -98,8 +102,9 @@ LEPT_VLLM_GROUP_PORT="${LEPT_VLLM_GROUP_PORT:-51216}"
 LEPT_VLLM_SERVER_HOST="${LEPT_VLLM_SERVER_HOST:-127.0.0.1}"
 LEPT_VLLM_MODE="${LEPT_VLLM_MODE:-auto}"
 LEPT_GRADIENT_CHECKPOINTING="${LEPT_GRADIENT_CHECKPOINTING:-1}"
-LEPT_MAX_COMPLETION_LENGTH="${LEPT_MAX_COMPLETION_LENGTH:-2048}"
+LEPT_MAX_COMPLETION_LENGTH="${LEPT_MAX_COMPLETION_LENGTH:-512}"
 LEPT_MAX_TOKENS_PER_STEP="${LEPT_MAX_TOKENS_PER_STEP:-512}"
+LEPT_MAX_EPISODE_TURNS="${LEPT_MAX_EPISODE_TURNS:-5}"
 LEPT_CURRICULUM_STAGE="${LEPT_CURRICULUM_STAGE:-1}"
 LEPT_FORMAT_WEIGHT="${LEPT_FORMAT_WEIGHT:-0.1}"
 LEPT_NO_FORMAT_REWARD="${LEPT_NO_FORMAT_REWARD:-0}"
@@ -333,6 +338,7 @@ COMMON_ARGS=(
     --env_base_url "$ENV_BASE_URL"
     --alpha "$LEPT_ALPHA"
     --format_weight "$LEPT_FORMAT_WEIGHT"
+    --max_episode_turns "$LEPT_MAX_EPISODE_TURNS"
     --curriculum_stage "$LEPT_CURRICULUM_STAGE"
     --max_tokens_per_step "$LEPT_MAX_TOKENS_PER_STEP"
     --log_every_n_steps "$LEPT_LOG_EVERY"

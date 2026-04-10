@@ -359,6 +359,14 @@ def _rollout_one_episode(
                 trainer, before_ids=last_before_ids, num_dummy=n_pad
             )
 
+        # Hard-cap total completion length to max_completion_length so TRL
+        # training tensors stay within GPU memory budget (OOM fix #1).
+        # max_total = int(trainer.args.max_completion_length)
+        # if len(completion_ids) > max_total:
+        #     completion_ids = completion_ids[:max_total]
+        #     env_mask = env_mask[:max_total]
+        #     logprob_seq = logprob_seq[:max_total]
+
         format_score = format_ok_count / max(1, turns)
         return (
             prompt_ids_fixed,
@@ -442,9 +450,9 @@ def main():
     parser.add_argument("--model", type=str, default="Qwen/Qwen3-0.6B")
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--num_generations", type=int, default=8)
-    parser.add_argument("--max_completion_length", type=int, default=2048)
+    parser.add_argument("--max_completion_length", type=int, default=512)
     parser.add_argument("--max_tokens_per_step", type=int, default=512)
-    parser.add_argument("--max_episode_turns", type=int, default=20)
+    parser.add_argument("--max_episode_turns", type=int, default=5)
     parser.add_argument("--curriculum_stage", type=int, default=1)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--format_weight", type=float, default=0.1)
