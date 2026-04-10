@@ -85,8 +85,11 @@ def _strip_think_blocks(text: str) -> str:
     """Remove Qwen3-style <think>...</think> blocks (and redacted variants) before JSON extraction."""
     # Qwen3 hybrid thinking delimiters
     text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.DOTALL)
+    # Unclosed <think> (model hit token limit before closing) — strip to end of string
+    text = re.sub(r"<think>[\s\S]*$", "", text, flags=re.DOTALL)
     # Log-style redaction wrappers
     text = re.sub(r"<redacted_thinking>[\s\S]*?</redacted_thinking>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<redacted_thinking>[\s\S]*$", "", text, flags=re.DOTALL)
     return text
 
 

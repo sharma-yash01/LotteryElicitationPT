@@ -16,7 +16,7 @@ from uuid import uuid4
 import numpy as np
 import torch.distributed as dist
 
-from training.action_parser import parse_llm_output
+from training.action_parser import parse_llm_output, _strip_think_blocks
 from training.config import TrainingRuntimeConfig
 from training.openenv_runtime import LotteryElicitationClient, to_openenv_base_url
 from training.prompts import format_observation_prompt, system_prompt_from_observation
@@ -315,11 +315,19 @@ def _rollout_one_episode(
             if gen_lp is None or len(gen_lp) != len(gen_ids):
                 gen_lp = [0.0] * len(gen_ids)
 
-            completion_ids.extend(gen_ids)
-            env_mask.extend([1] * len(gen_ids))
-            logprob_seq.extend(gen_lp)
-
             text = tok.decode(gen_ids, skip_special_tokens=True)
+
+            # Strip think tokens from training tensor (Fix 9 step 2).
+            # Think blocks inflate completion_ids but carry no useful gradient
+            # signal — re-encode only the JSON-relevant text.
+            stripped_text = _strip_think_blocks(text)
+            stripped_ids = tok.encode(stripped_text, add_special_tokens=False)
+            stripped_lp = [0.0] * len(stripped_ids)
+
+            completion_ids.extend(stripped_ids)
+            env_mask.extend([1] * len(stripped_ids))
+            logprob_seq.extend(stripped_lp)
+
             messages.append({"role": "assistant", "content": text})
 
             action_dict, was_valid = parse_llm_output(text, session._obs or {}, rng=rng)
