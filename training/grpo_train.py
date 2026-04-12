@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import logging
 import threading
 import warnings
 from contextlib import contextmanager
@@ -16,7 +17,7 @@ from uuid import uuid4
 import numpy as np
 import torch.distributed as dist
 
-from training.action_parser import parse_llm_output, _strip_think_blocks
+from training.action_parser import fallback_action, parse_llm_output, _strip_think_blocks
 from training.config import TrainingRuntimeConfig
 from training.openenv_runtime import LotteryElicitationClient, to_openenv_base_url
 from training.prompts import format_observation_prompt, system_prompt_from_observation
@@ -46,6 +47,8 @@ RUNTIME_CFG: TrainingRuntimeConfig | None = None
 REWARD_LOG_PATH: str = ""
 EPISODE_LOG_COUNT: int = 0
 LOG_LOCK = threading.Lock()
+
+logger = logging.getLogger(__name__)
 
 # Align with LotteryElicitationEnv.env.config.EnvConfig.max_steps (remote hard cap).
 LOTTERY_ENV_MAX_STEPS = 10
@@ -122,7 +125,14 @@ class EpisodeSession:
         self._obs = result.observation
         return self._obs
 
-    def apply_action(self, action_dict: dict, *, raw_llm_text: str, was_valid: bool) -> None:
+    def apply_action(
+        self,
+        action_dict: dict,
+        *,
+        raw_llm_text: str,
+        was_valid: bool,
+        parse_failure_reason: str | None = None,
+    ) -> None:
         if self._env is None:
             raise RuntimeError("EpisodeSession must be used as a context manager.")
         if self.done:
@@ -134,7 +144,7 @@ class EpisodeSession:
         self.reward += step_reward
         self.done = bool(result.done)
 
-        self.step_logs.append({
+        log_entry: dict[str, Any] = {
             "step_index": len(self.step_logs) + 1,
             "raw_llm_text": raw_llm_text,
             "action": action_dict,
@@ -143,7 +153,10 @@ class EpisodeSession:
             "step_reward": step_reward,
             "raw_env_reward": raw_step_reward,
             "done_after_step": self.done,
-        })
+        }
+        if parse_failure_reason:
+            log_entry["parse_failure_reason"] = parse_failure_reason
+        self.step_logs.append(log_entry)
 
         if self.done:
             _write_episode_log({
@@ -154,6 +167,37 @@ class EpisodeSession:
                 "steps": self.step_logs,
                 "final_observation": self._obs,
             })
+
+    def record_step_aborted(
+        self,
+        *,
+        raw_llm_text: str,
+        action_dict: dict,
+        parse_failure_reason: str,
+        env_step_error: str,
+    ) -> None:
+        """Log a failed env.step (no remote call); ends episode so rollout can exit cleanly."""
+        self.step_logs.append({
+            "step_index": len(self.step_logs) + 1,
+            "raw_llm_text": raw_llm_text,
+            "action": action_dict,
+            "was_valid_parse": False,
+            "parse_failure_reason": parse_failure_reason,
+            "env_step_error": env_step_error,
+            "choice": None,
+            "step_reward": 0.0,
+            "raw_env_reward": 0.0,
+            "done_after_step": True,
+        })
+        self.done = True
+        _write_episode_log({
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "episode_id": self.episode_id,
+            "episode_reward": self.reward,
+            "num_steps": len(self.step_logs),
+            "steps": self.step_logs,
+            "final_observation": self._obs,
+        })
 
 
 def _tokenize_messages(
@@ -291,81 +335,127 @@ def _rollout_one_episode(
         format_ok_count = 0
         turns = 0
 
-        while not session.done and turns < per_episode_generate_target:
-            turns += 1
-            step_cap = _per_step_cap(trainer)
-            before_ids = _tokenize_messages(
-                tok,
-                messages,
-                chat_template=chat_template,
-                chat_template_kwargs=chat_template_kwargs,
-                tools=tools,
-                add_generation_prompt=True,
-            )
-            last_before_ids = before_ids
-
-            with _temporary_vllm_max_tokens(trainer, step_cap):
-                _, gen_ids_batch, logprobs_raw, _ = trainer.vllm_generation.generate(
-                    prompts=[before_ids],
-                    images=None,
-                    num_generations=1,
+        try:
+            while not session.done and turns < per_episode_generate_target:
+                turns += 1
+                step_cap = _per_step_cap(trainer)
+                before_ids = _tokenize_messages(
+                    tok,
+                    messages,
+                    chat_template=chat_template,
+                    chat_template_kwargs=chat_template_kwargs,
+                    tools=tools,
+                    add_generation_prompt=True,
                 )
-            gen_ids = gen_ids_batch[0]
-            gen_lp = _squeeze_vllm_logprobs(logprobs_raw)
-            if gen_lp is None or len(gen_lp) != len(gen_ids):
-                gen_lp = [0.0] * len(gen_ids)
+                last_before_ids = before_ids
 
-            text = tok.decode(gen_ids, skip_special_tokens=True)
+                with _temporary_vllm_max_tokens(trainer, step_cap):
+                    _, gen_ids_batch, logprobs_raw, _ = trainer.vllm_generation.generate(
+                        prompts=[before_ids],
+                        images=None,
+                        num_generations=1,
+                    )
+                gen_ids = gen_ids_batch[0]
+                gen_lp = _squeeze_vllm_logprobs(logprobs_raw)
+                if gen_lp is None or len(gen_lp) != len(gen_ids):
+                    gen_lp = [0.0] * len(gen_ids)
 
-            # Strip think tokens from training tensor (Fix 9 step 2).
-            # Think blocks inflate completion_ids but carry no useful gradient
-            # signal — re-encode only the JSON-relevant text.
-            stripped_text = _strip_think_blocks(text)
-            stripped_ids = tok.encode(stripped_text, add_special_tokens=False)
-            stripped_lp = [0.0] * len(stripped_ids)
+                text = tok.decode(gen_ids, skip_special_tokens=True)
 
-            completion_ids.extend(stripped_ids)
-            env_mask.extend([1] * len(stripped_ids))
-            logprob_seq.extend(stripped_lp)
+                # Strip think tokens from training tensor (Fix 9 step 2).
+                # Think blocks inflate completion_ids but carry no useful gradient
+                # signal — re-encode only the JSON-relevant text.
+                stripped_text = _strip_think_blocks(text)
+                stripped_ids = tok.encode(stripped_text, add_special_tokens=False)
+                stripped_lp = [0.0] * len(stripped_ids)
 
-            messages.append({"role": "assistant", "content": text})
+                completion_ids.extend(stripped_ids)
+                env_mask.extend([1] * len(stripped_ids))
+                logprob_seq.extend(stripped_lp)
 
-            action_dict, was_valid = parse_llm_output(text, session._obs or {}, rng=rng)
-            format_ok_count += int(was_valid)
-            session.apply_action(action_dict, raw_llm_text=text, was_valid=was_valid)
+                messages.append({"role": "assistant", "content": text})
 
-            if session.done:
-                break
+                parse_reason_buf: list[str] = []
+                try:
+                    action_dict, was_valid = parse_llm_output(
+                        text,
+                        session._obs or {},
+                        rng=rng,
+                        failure_reason=parse_reason_buf,
+                    )
+                    format_ok_count += int(was_valid)
+                    pfr = parse_reason_buf[0] if parse_reason_buf else None
+                    session.apply_action(
+                        action_dict,
+                        raw_llm_text=text,
+                        was_valid=was_valid,
+                        parse_failure_reason=pfr if not was_valid else None,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "rollout parse_or_env_step failed episode=%s turn=%s",
+                        session.episode_id,
+                        turns,
+                    )
+                    fb = fallback_action(session._obs or {}, rng)
+                    exc_name = type(exc).__name__
+                    exc_msg = str(exc)
+                    if parse_reason_buf:
+                        msg = f"{parse_reason_buf[0]};exc:{exc_name}:{exc_msg}"
+                    else:
+                        msg = f"exc:{exc_name}:{exc_msg}"
+                    try:
+                        session.apply_action(
+                            fb,
+                            raw_llm_text=text,
+                            was_valid=False,
+                            parse_failure_reason=msg,
+                        )
+                    except Exception as exc2:
+                        logger.exception(
+                            "rollout fallback env.step failed episode=%s turn=%s",
+                            session.episode_id,
+                            turns,
+                        )
+                        session.record_step_aborted(
+                            raw_llm_text=text,
+                            action_dict=fb,
+                            parse_failure_reason=msg,
+                            env_step_error=f"{type(exc2).__name__}:{exc2}",
+                        )
 
-            after_asst_ids = _tokenize_messages(
-                tok,
-                messages,
-                chat_template=chat_template,
-                chat_template_kwargs=chat_template_kwargs,
-                tools=tools,
-                add_generation_prompt=True,
-            )
-            messages.append(
-                {"role": "user", "content": format_observation_prompt(session._obs or {})}
-            )
-            after_user_ids = _tokenize_messages(
-                tok,
-                messages,
-                chat_template=chat_template,
-                chat_template_kwargs=chat_template_kwargs,
-                tools=tools,
-                add_generation_prompt=True,
-            )
-            suffix = after_user_ids[len(after_asst_ids) :]
-            completion_ids.extend(suffix)
-            env_mask.extend([0] * len(suffix))
-            logprob_seq.extend([0.0] * len(suffix))
+                if session.done:
+                    break
 
-        if _needs_vllm_server_generate_padding(trainer):
-            n_pad = max(0, per_episode_generate_target - turns)
-            _pad_vllm_server_generates_to_target(
-                trainer, before_ids=last_before_ids, num_dummy=n_pad
-            )
+                after_asst_ids = _tokenize_messages(
+                    tok,
+                    messages,
+                    chat_template=chat_template,
+                    chat_template_kwargs=chat_template_kwargs,
+                    tools=tools,
+                    add_generation_prompt=True,
+                )
+                messages.append(
+                    {"role": "user", "content": format_observation_prompt(session._obs or {})}
+                )
+                after_user_ids = _tokenize_messages(
+                    tok,
+                    messages,
+                    chat_template=chat_template,
+                    chat_template_kwargs=chat_template_kwargs,
+                    tools=tools,
+                    add_generation_prompt=True,
+                )
+                suffix = after_user_ids[len(after_asst_ids) :]
+                completion_ids.extend(suffix)
+                env_mask.extend([0] * len(suffix))
+                logprob_seq.extend([0.0] * len(suffix))
+        finally:
+            if _needs_vllm_server_generate_padding(trainer):
+                n_pad = max(0, per_episode_generate_target - turns)
+                _pad_vllm_server_generates_to_target(
+                    trainer, before_ids=last_before_ids, num_dummy=n_pad
+                )
 
         # Hard-cap total completion length to max_completion_length so TRL
         # training tensors stay within GPU memory budget (OOM fix #1).

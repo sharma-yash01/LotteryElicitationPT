@@ -150,6 +150,72 @@ class TestActionParser(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("lottery_a", action)
 
+    def test_null_outcome_value_rejected(self):
+        bad = {
+            "outcomes": [
+                {"value": None, "probability": 0.5},
+                {"value": 0.0, "probability": 0.5},
+            ]
+        }
+        text = json.dumps({"lottery_a": bad, "lottery_b": _LOT})
+        reasons: list[str] = []
+        _, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0), failure_reason=reasons)
+        self.assertFalse(ok)
+        self.assertTrue(reasons and reasons[0].startswith("invalid_lottery"))
+
+    def test_non_numeric_probability_rejected(self):
+        bad = {
+            "outcomes": [
+                {"value": 1.0, "probability": "not_a_float"},
+                {"value": 2.0, "probability": 0.5},
+            ]
+        }
+        text = json.dumps({"lottery_a": bad, "lottery_b": _LOT})
+        _, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertFalse(ok)
+
+    def test_nan_probability_rejected(self):
+        bad = {
+            "outcomes": [
+                {"value": 1.0, "probability": float("nan")},
+                {"value": 2.0, "probability": 0.5},
+            ]
+        }
+        text = json.dumps({"lottery_a": bad, "lottery_b": _LOT})
+        _, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertFalse(ok)
+
+    def test_invalid_theta_stripped_valid_lotteries(self):
+        """Out-of-range or null theta must not crash; lotteries still valid."""
+        text = json.dumps(
+            {
+                "lottery_a": _LOT,
+                "lottery_b": _LOT,
+                "theta_estimate": {"gamma": None, "lambda": 2.0},
+            }
+        )
+        action, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertTrue(ok)
+        self.assertNotIn("theta_estimate", action)
+
+    def test_theta_out_of_range_stripped(self):
+        text = json.dumps(
+            {
+                "lottery_a": _LOT,
+                "lottery_b": _LOT,
+                "theta_estimate": {"gamma": 99.0, "lambda": 2.0},
+            }
+        )
+        action, ok = parse_llm_output(text, _BASE_OBS, rng=np.random.default_rng(0))
+        self.assertTrue(ok)
+        self.assertNotIn("theta_estimate", action)
+
+    def test_failure_reason_on_no_json(self):
+        reasons: list[str] = []
+        _, ok = parse_llm_output("no brace here", _BASE_OBS, rng=np.random.default_rng(0), failure_reason=reasons)
+        self.assertFalse(ok)
+        self.assertEqual(reasons, ["no_json_object"])
+
 
 if __name__ == "__main__":
     unittest.main()

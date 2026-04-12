@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -11,27 +12,51 @@ import numpy as np
 _PROB_SUM_TOL = 1e-3
 
 
+def _safe_int(x: Any, default: int = 1) -> int:
+    try:
+        return int(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(x: Any) -> float | None:
+    """Coerce to float; reject nan/inf and failed coercion."""
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return v
+
+
 def _normalize_lottery_probabilities(lot: dict[str, Any]) -> dict[str, Any]:
     """Renormalize outcome probabilities to sum to exactly 1.0 (server Pydantic uses 1e-6)."""
     outcomes = lot["outcomes"]
-    total = sum(float(o["probability"]) for o in outcomes)
+    probs: list[float] = []
+    vals: list[float] = []
+    for o in outcomes:
+        pv = _safe_float(o.get("probability"))
+        vv = _safe_float(o.get("value"))
+        if pv is None or vv is None:
+            raise ValueError("non-finite lottery outcome")
+        probs.append(pv)
+        vals.append(vv)
+    total = sum(probs)
     if total <= 0.0:
-        return {
-            "outcomes": [
-                {"value": float(o["value"]), "probability": float(o["probability"])}
-                for o in outcomes
-            ]
-        }
+        return {"outcomes": [{"value": vals[i], "probability": probs[i]} for i in range(len(outcomes))]}
     n = len(outcomes)
     new_outcomes: list[dict[str, Any]] = []
     acc = 0.0
-    for i, o in enumerate(outcomes):
+    for i in range(n):
         if i == n - 1:
             p = 1.0 - acc
         else:
-            p = float(o["probability"]) / total
+            p = probs[i] / total
             acc += p
-        new_outcomes.append({"value": float(o["value"]), "probability": p})
+        new_outcomes.append({"value": vals[i], "probability": p})
     return {"outcomes": new_outcomes}
 
 
@@ -39,16 +64,21 @@ def _normalize_ranges(obs: dict) -> tuple[tuple[float, float], tuple[float, floa
     def pair(key: str, default: tuple[float, float]) -> tuple[float, float]:
         v = obs.get(key)
         if isinstance(v, (list, tuple)) and len(v) >= 2:
-            return (float(v[0]), float(v[1]))
+            a = _safe_float(v[0])
+            b = _safe_float(v[1])
+            if a is not None and b is not None:
+                return (a, b)
         return default
 
     return pair("gamma_range", (0.2, 1.5)), pair("lambda_range", (1.0, 4.5))
 
 
 def _value_bounds(obs: dict) -> tuple[float, float]:
+    lo = _safe_float(obs.get("min_outcome_value", -50.0))
+    hi = _safe_float(obs.get("max_outcome_value", 100.0))
     return (
-        float(obs.get("min_outcome_value", -50.0)),
-        float(obs.get("max_outcome_value", 100.0)),
+        lo if lo is not None else -50.0,
+        hi if hi is not None else 100.0,
     )
 
 
@@ -72,13 +102,18 @@ def _random_fallback_action(obs: dict, rng: np.random.Generator | None) -> dict[
         "lottery_a": _random_lottery(),
         "lottery_b": _random_lottery(),
     }
-    if int(obs.get("steps_remaining", 1)) <= 1:
+    if _safe_int(obs.get("steps_remaining"), 1) <= 1:
         gamma_range, lambda_range = _normalize_ranges(obs)
         action["theta_estimate"] = {
             "gamma": (gamma_range[0] + gamma_range[1]) / 2,
             "lambda": (lambda_range[0] + lambda_range[1]) / 2,
         }
     return action
+
+
+def fallback_action(obs: dict, rng: np.random.Generator | None = None) -> dict[str, Any]:
+    """Public alias for rollout crash recovery (same as internal random fallback)."""
+    return _random_fallback_action(obs, rng)
 
 
 def _strip_think_blocks(text: str) -> str:
@@ -159,8 +194,10 @@ def _valid_lottery(
             return False
         if "value" not in o or "probability" not in o:
             return False
-        val = float(o["value"])
-        pr = float(o["probability"])
+        val = _safe_float(o.get("value"))
+        pr = _safe_float(o.get("probability"))
+        if val is None or pr is None:
+            return False
         if val < v_lo or val > v_hi:
             return False
         if pr < 0.0 or pr > 1.0:
@@ -169,8 +206,22 @@ def _valid_lottery(
     return abs(s - 1.0) <= _PROB_SUM_TOL
 
 
+def _theta_from_payload(te: dict[str, Any], obs: dict) -> dict[str, float] | None:
+    """Parse theta_estimate if both keys present and in range; else None (caller keeps lotteries-only)."""
+    if "gamma" not in te or "lambda" not in te:
+        return None
+    g = _safe_float(te.get("gamma"))
+    lam = _safe_float(te.get("lambda"))
+    if g is None or lam is None:
+        return None
+    (g_lo, g_hi), (l_lo, l_hi) = _normalize_ranges(obs)
+    if not (g_lo <= g <= g_hi and l_lo <= lam <= l_hi):
+        return None
+    return {"gamma": g, "lambda": lam}
+
+
 def _finalize_action(action: dict[str, Any], obs: dict) -> dict[str, Any]:
-    if int(obs.get("steps_remaining", 1)) <= 1 and "theta_estimate" not in action:
+    if _safe_int(obs.get("steps_remaining"), 1) <= 1 and "theta_estimate" not in action:
         gamma_range, lambda_range = _normalize_ranges(obs)
         action = dict(action)
         action["theta_estimate"] = {
@@ -183,33 +234,61 @@ def _finalize_action(action: dict[str, Any], obs: dict) -> dict[str, Any]:
     return action
 
 
+def _set_parse_failure_reason(holder: list[str] | None, msg: str) -> None:
+    if holder is not None:
+        holder.clear()
+        holder.append(msg)
+
+
 def parse_llm_output(
     text: str,
     obs: dict,
     *,
     rng: np.random.Generator | None = None,
+    failure_reason: list[str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Parse LLM text → action dict for env.step(); second value is parse validity."""
+    """Parse LLM text → action dict for env.step(); second value is parse validity.
+
+    If *failure_reason* is a list, on failure it is replaced with a single human-readable reason
+    (empty list on success).
+    """
+    if failure_reason is not None:
+        failure_reason.clear()
+
     stripped = _strip_think_blocks(text)
     stripped = _strip_json_fences(stripped)
     blob = _extract_first_json_object(stripped)
     if blob is None:
+        _set_parse_failure_reason(failure_reason, "no_json_object")
         return _random_fallback_action(obs, rng), False
     try:
         data = _loads_lenient(blob)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        _set_parse_failure_reason(failure_reason, f"json_decode:{type(e).__name__}")
         return _random_fallback_action(obs, rng), False
     if not isinstance(data, dict):
+        _set_parse_failure_reason(failure_reason, "payload_not_object")
         return _random_fallback_action(obs, rng), False
 
     v_lo, v_hi = _value_bounds(obs)
     la = data.get("lottery_a")
     lb = data.get("lottery_b")
-    if not _valid_lottery(la, v_lo=v_lo, v_hi=v_hi) or not _valid_lottery(lb, v_lo=v_lo, v_hi=v_hi):
+    ok_a, ok_b = _valid_lottery(la, v_lo=v_lo, v_hi=v_hi), _valid_lottery(lb, v_lo=v_lo, v_hi=v_hi)
+    if not ok_a or not ok_b:
+        which = []
+        if not ok_a:
+            which.append("lottery_a")
+        if not ok_b:
+            which.append("lottery_b")
+        _set_parse_failure_reason(failure_reason, f"invalid_lottery:{','.join(which)}")
         return _random_fallback_action(obs, rng), False
 
-    la_n = _normalize_lottery_probabilities(la)
-    lb_n = _normalize_lottery_probabilities(lb)
+    try:
+        la_n = _normalize_lottery_probabilities(la)
+        lb_n = _normalize_lottery_probabilities(lb)
+    except Exception as e:
+        _set_parse_failure_reason(failure_reason, f"normalize_lottery:{type(e).__name__}")
+        return _random_fallback_action(obs, rng), False
 
     action: dict[str, Any] = {
         "lottery_a": la_n,
@@ -217,13 +296,19 @@ def parse_llm_output(
     }
     if "theta_estimate" in data and isinstance(data["theta_estimate"], dict):
         te = data["theta_estimate"]
-        if "gamma" in te and "lambda" in te:
-            action["theta_estimate"] = {
-                "gamma": float(te["gamma"]),
-                "lambda": float(te["lambda"]),
-            }
+        parsed_te = _theta_from_payload(te, obs)
+        if parsed_te is not None:
+            action["theta_estimate"] = parsed_te
+        elif "gamma" in te or "lambda" in te:
+            # Partial or non-numeric theta must not crash; strip and let _finalize inject on last turn.
+            pass
     if data.get("terminate_early") is True:
         action["terminate_early"] = True
 
-    action = _finalize_action(action, obs)
+    try:
+        action = _finalize_action(action, obs)
+    except Exception as e:
+        _set_parse_failure_reason(failure_reason, f"finalize_action:{type(e).__name__}")
+        return _random_fallback_action(obs, rng), False
+
     return action, True
