@@ -56,7 +56,8 @@ usage() {
     echo "  LEPT_NO_BF16          default: 0 (set to 1 for --no_bf16)"
     echo "  LEPT_ACCELERATE_MAIN_PORT  optional (default: 29500) for accelerate launch"
     echo "  LEPT_MODEL_SHARDING   default: 0 (set to 1 for FSDP via config/accelerate/model-sharding.yaml; requires server mode, TRAIN_PROCS>=2)"
-    echo "  LEPT_ACCELERATE_CONFIG optional path to Accelerate YAML (used when LEPT_MODEL_SHARDING=1; default: <LEPT_ROOT>/config/accelerate/model-sharding.yaml)"
+    echo "  LEPT_ACCELERATE_CONFIG optional path to Accelerate YAML (used when LEPT_MODEL_SHARDING=1; overrides defaults below)"
+    echo "  LEPT_FSDP2_SHARDING   default: 0 (set to 1 when LEPT_MODEL_SHARDING=1 to use <LEPT_ROOT>/config/accelerate/model-sharding-fsdp2.yaml if LEPT_ACCELERATE_CONFIG unset)"
     echo "  LEPT_ALPHA            default: 1.0"
     echo "  LEPT_LOG_EVERY        default: 1"
     echo "  LEPT_INSTALL_DEPS_ON_RUN  default: 0 (set to 1 to pip install before run)"
@@ -122,10 +123,16 @@ LEPT_REASONING_MODE="${LEPT_REASONING_MODE:-off}"
 # LEPT_MODEL_SHARDING: 0 = default (DDP-style multi-process); 1 = FSDP full-shard (see config/accelerate/model-sharding.yaml).
 LEPT_MODEL_SHARDING="${LEPT_MODEL_SHARDING:-0}"
 LEPT_DEFAULT_SHARDING_CONFIG="${LEPT_ROOT}/config/accelerate/model-sharding.yaml"
+LEPT_DEFAULT_SHARDING_CONFIG_FSDP2="${LEPT_ROOT}/config/accelerate/model-sharding-fsdp2.yaml"
+LEPT_FSDP2_SHARDING="${LEPT_FSDP2_SHARDING:-0}"
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-7200}"
 
 if [[ "$LEPT_MODEL_SHARDING" != "0" && "$LEPT_MODEL_SHARDING" != "1" ]]; then
     echo "[ERROR] LEPT_MODEL_SHARDING must be 0 or 1 (got: $LEPT_MODEL_SHARDING)"
+    exit 1
+fi
+if [[ "$LEPT_FSDP2_SHARDING" != "0" && "$LEPT_FSDP2_SHARDING" != "1" ]]; then
+    echo "[ERROR] LEPT_FSDP2_SHARDING must be 0 or 1 (got: $LEPT_FSDP2_SHARDING)"
     exit 1
 fi
 
@@ -254,7 +261,13 @@ echo "  Grad accum:      $LEPT_GRAD_ACCUM"
 echo "  Output dir:      $LEPT_OUTPUT_DIR"
 echo "  Env URL:         $ENV_BASE_URL"
 if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
-    echo "  Model sharding:  FSDP (Accelerate; see config/accelerate/model-sharding.yaml)"
+    if [[ -n "${LEPT_ACCELERATE_CONFIG:-}" ]]; then
+        echo "  Model sharding:  FSDP (Accelerate; LEPT_ACCELERATE_CONFIG=$LEPT_ACCELERATE_CONFIG)"
+    elif [[ "$LEPT_FSDP2_SHARDING" == "1" ]]; then
+        echo "  Model sharding:  FSDP (Accelerate; template model-sharding-fsdp2.yaml)"
+    else
+        echo "  Model sharding:  FSDP (Accelerate; see config/accelerate/model-sharding.yaml)"
+    fi
 fi
 echo "==============================="
 
@@ -398,7 +411,13 @@ fi
 # ---- FSDP / model sharding (Accelerate --config_file) ----
 LEPT_ACCEL_CONFIG_FILE=""
 if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
-    SHARD_SRC="${LEPT_ACCELERATE_CONFIG:-$LEPT_DEFAULT_SHARDING_CONFIG}"
+    if [[ -n "${LEPT_ACCELERATE_CONFIG:-}" ]]; then
+        SHARD_SRC="$LEPT_ACCELERATE_CONFIG"
+    elif [[ "$LEPT_FSDP2_SHARDING" == "1" ]]; then
+        SHARD_SRC="$LEPT_DEFAULT_SHARDING_CONFIG_FSDP2"
+    else
+        SHARD_SRC="$LEPT_DEFAULT_SHARDING_CONFIG"
+    fi
     if [[ ! -f "$SHARD_SRC" ]]; then
         echo "[ERROR] Accelerate config for model sharding not found: $SHARD_SRC"
         exit 1
@@ -436,6 +455,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
     echo ""
     if [[ -n "$LEPT_ACCEL_CONFIG_FILE" ]]; then
         echo "[DRY RUN] Would write patched Accelerate config to: $LEPT_ACCEL_CONFIG_FILE"
+        echo "[DRY RUN] Accelerate config template: $SHARD_SRC"
     fi
     exit 0
 fi

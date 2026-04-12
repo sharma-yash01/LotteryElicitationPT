@@ -177,6 +177,7 @@ if [[ -n "${LEPT_VENV:-}" && -f "$LEPT_VENV/bin/python" ]]; then
     fi
 
     LEPT_MODEL_SHARDING="${LEPT_MODEL_SHARDING:-0}"
+    LEPT_FSDP2_SHARDING="${LEPT_FSDP2_SHARDING:-0}"
     if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
         echo ""
         echo "--- Model sharding (FSDP) ---"
@@ -185,11 +186,17 @@ if [[ -n "${LEPT_VENV:-}" && -f "$LEPT_VENV/bin/python" ]]; then
         else
             pass "LEPT_VLLM_MODE compatible with sharding (server)"
         fi
-        SHARD_CFG="${LEPT_ACCELERATE_CONFIG:-${LEPT_ROOT}/config/accelerate/model-sharding.yaml}"
+        if [[ -n "${LEPT_ACCELERATE_CONFIG:-}" ]]; then
+            SHARD_CFG="$LEPT_ACCELERATE_CONFIG"
+        elif [[ "$LEPT_FSDP2_SHARDING" == "1" ]]; then
+            SHARD_CFG="${LEPT_ROOT}/config/accelerate/model-sharding-fsdp2.yaml"
+        else
+            SHARD_CFG="${LEPT_ROOT}/config/accelerate/model-sharding.yaml"
+        fi
         if [[ -f "$SHARD_CFG" ]]; then
             pass "Accelerate sharding config exists: $SHARD_CFG"
         else
-            fail "Accelerate sharding config missing: $SHARD_CFG (set LEPT_ACCELERATE_CONFIG or add config/accelerate/model-sharding.yaml)"
+            fail "Accelerate sharding config missing: $SHARD_CFG (set LEPT_ACCELERATE_CONFIG, LEPT_FSDP2_SHARDING=1 with model-sharding-fsdp2.yaml, or add config/accelerate/model-sharding.yaml)"
         fi
         TRAIN_PROCS_CHECK=$((GPU_COUNT - LEPT_VLLM_TP))
         if [[ "$TRAIN_PROCS_CHECK" -lt 2 ]]; then

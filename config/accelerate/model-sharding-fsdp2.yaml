@@ -1,7 +1,3 @@
-# Accelerate config: FSDP full-shard for GRPO (model-sharding).
-# `num_processes` is overwritten at launch by scripts/run_grpo_lambda.sh to match TRAIN_PROCS.
-# Based on https://github.com/huggingface/trl/blob/main/examples/accelerate_configs/fsdp1.yaml
-compute_environment: LOCAL_MACHINE
 debug: false
 distributed_type: FSDP
 downcast_bf16: 'no'
@@ -17,7 +13,7 @@ fsdp_config:
   fsdp_state_dict_type: FULL_STATE_DICT
   fsdp_sync_module_states: true
   fsdp_use_orig_params: true
-  fsdp_version: 1
+  fsdp_version: 2
 machine_rank: 0
 main_training_function: main
 mixed_precision: bf16
