@@ -41,7 +41,7 @@ usage() {
     echo "  LEPT_GRAD_ACCUM_OVERRIDE  set to any value to skip grad-accum auto-tune"
     echo "  LEPT_NUM_GPUS         default: auto (nvidia-smi count)"
     echo "  LEPT_VLLM_MODE        default: auto (server if >=2 GPUs, else colocate)"
-    echo "  LEPT_VLLM_TP          default: 1 (vLLM tensor parallel GPUs in server mode)"
+    echo "  LEPT_VLLM_TP          default: 1 (vLLM tensor parallel GPUs in server mode; alternative: set to number of GPUs for tensor parallelism, e.g., 2, 4, 8)"
     echo "  LEPT_VLLM_PORT        default: 8001 (trl vllm-serve HTTP; must differ from OpenEnv, LotteryElicitationEnv uses 9000)"
     echo "  LEPT_VLLM_GROUP_PORT  default: 51216 (TRL weight-sync TCP; match training --vllm_group_port)"
     echo "  LEPT_VLLM_SERVER_HOST default: 127.0.0.1 (passed to grpo_train --vllm_server_host)"
@@ -55,6 +55,8 @@ usage() {
     echo "  LEPT_FORMAT_WEIGHT         default: 0.1 (set LEPT_NO_FORMAT_REWARD=1 for --no_format_reward)"
     echo "  LEPT_NO_BF16          default: 0 (set to 1 for --no_bf16)"
     echo "  LEPT_ACCELERATE_MAIN_PORT  optional (default: 29500) for accelerate launch"
+    echo "  LEPT_MODEL_SHARDING   default: 0 (set to 1 for FSDP via config/accelerate/model-sharding.yaml; requires server mode, TRAIN_PROCS>=2)"
+    echo "  LEPT_ACCELERATE_CONFIG optional path to Accelerate YAML (used when LEPT_MODEL_SHARDING=1; default: <LEPT_ROOT>/config/accelerate/model-sharding.yaml)"
     echo "  LEPT_ALPHA            default: 1.0"
     echo "  LEPT_LOG_EVERY        default: 1"
     echo "  LEPT_INSTALL_DEPS_ON_RUN  default: 0 (set to 1 to pip install before run)"
@@ -116,6 +118,17 @@ LEPT_REQUIREMENTS_FILE="${LEPT_REQUIREMENTS_FILE:-$LEPT_ROOT/requirements.lambda
 PYTORCH_WHEEL_INDEX="${PYTORCH_WHEEL_INDEX:-}"
 LEPT_REASONING_MODE="${LEPT_REASONING_MODE:-off}"
 
+# ---- Model sharding (FSDP via Accelerate) ----
+# LEPT_MODEL_SHARDING: 0 = default (DDP-style multi-process); 1 = FSDP full-shard (see config/accelerate/model-sharding.yaml).
+LEPT_MODEL_SHARDING="${LEPT_MODEL_SHARDING:-0}"
+LEPT_DEFAULT_SHARDING_CONFIG="${LEPT_ROOT}/config/accelerate/model-sharding.yaml"
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC="${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-7200}"
+
+if [[ "$LEPT_MODEL_SHARDING" != "0" && "$LEPT_MODEL_SHARDING" != "1" ]]; then
+    echo "[ERROR] LEPT_MODEL_SHARDING must be 0 or 1 (got: $LEPT_MODEL_SHARDING)"
+    exit 1
+fi
+
 # ---- GPU fleet & vLLM mode (respects CUDA_VISIBLE_DEVICES via nvidia-smi) ----
 if [[ "$LEPT_VLLM_MODE" != "auto" && "$LEPT_VLLM_MODE" != "server" && "$LEPT_VLLM_MODE" != "colocate" ]]; then
     echo "[ERROR] LEPT_VLLM_MODE must be auto, server, or colocate (got: $LEPT_VLLM_MODE)"
@@ -151,6 +164,17 @@ if [[ "$LEPT_VLLM_MODE" == "server" ]]; then
     fi
 else
     TRAIN_PROCS=1
+fi
+
+if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
+    if [[ "$LEPT_VLLM_MODE" != "server" ]]; then
+        echo "[ERROR] LEPT_MODEL_SHARDING=1 requires LEPT_VLLM_MODE=server (got: $LEPT_VLLM_MODE)."
+        exit 1
+    fi
+    if [[ "$TRAIN_PROCS" -lt 2 ]]; then
+        echo "[ERROR] LEPT_MODEL_SHARDING=1 requires at least 2 training GPUs/processes (TRAIN_PROCS=$TRAIN_PROCS)."
+        exit 1
+    fi
 fi
 
 TARGET_EFFECTIVE_PROMPTS=16
@@ -229,6 +253,9 @@ echo "  Num generations: $LEPT_NUM_GENERATIONS"
 echo "  Grad accum:      $LEPT_GRAD_ACCUM"
 echo "  Output dir:      $LEPT_OUTPUT_DIR"
 echo "  Env URL:         $ENV_BASE_URL"
+if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
+    echo "  Model sharding:  FSDP (Accelerate; see config/accelerate/model-sharding.yaml)"
+fi
 echo "==============================="
 
 # ------------------------------------------------------------------ dependency precheck
@@ -368,12 +395,34 @@ if [[ "${LEPT_NO_BF16:-0}" == "1" ]]; then
     COMMON_ARGS+=(--no_bf16)
 fi
 
+# ---- FSDP / model sharding (Accelerate --config_file) ----
+LEPT_ACCEL_CONFIG_FILE=""
+if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
+    SHARD_SRC="${LEPT_ACCELERATE_CONFIG:-$LEPT_DEFAULT_SHARDING_CONFIG}"
+    if [[ ! -f "$SHARD_SRC" ]]; then
+        echo "[ERROR] Accelerate config for model sharding not found: $SHARD_SRC"
+        exit 1
+    fi
+    LEPT_ACCEL_CONFIG_FILE="${LEPT_OUTPUT_DIR}/accelerate_model_sharding_runtime.yaml"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        mkdir -p "$LEPT_OUTPUT_DIR"
+        sed -E "s/^num_processes:[[:space:]]*[0-9]+/num_processes: ${TRAIN_PROCS}/" "$SHARD_SRC" > "$LEPT_ACCEL_CONFIG_FILE"
+        echo ">>> Model sharding: patched Accelerate config → $LEPT_ACCEL_CONFIG_FILE (num_processes=$TRAIN_PROCS)"
+    fi
+fi
+
 if [[ "$LEPT_VLLM_MODE" == "server" ]]; then
-    TRAIN_CMD=(
-        env CUDA_VISIBLE_DEVICES="$TRAIN_CUDA_DEVS"
+    LAUNCH_ARGS=(
         accelerate launch
         --num_processes "$TRAIN_PROCS"
         --main_process_port "${LEPT_ACCELERATE_MAIN_PORT:-29500}"
+    )
+    if [[ -n "$LEPT_ACCEL_CONFIG_FILE" ]]; then
+        LAUNCH_ARGS+=(--config_file "$LEPT_ACCEL_CONFIG_FILE")
+    fi
+    TRAIN_CMD=(
+        env CUDA_VISIBLE_DEVICES="$TRAIN_CUDA_DEVS"
+        "${LAUNCH_ARGS[@]}"
         "${COMMON_ARGS[@]}"
     )
 else
@@ -385,6 +434,9 @@ if [[ $DRY_RUN -eq 1 ]]; then
     echo "[DRY RUN] Command:"
     printf '  %q' "${TRAIN_CMD[@]}"
     echo ""
+    if [[ -n "$LEPT_ACCEL_CONFIG_FILE" ]]; then
+        echo "[DRY RUN] Would write patched Accelerate config to: $LEPT_ACCEL_CONFIG_FILE"
+    fi
     exit 0
 fi
 

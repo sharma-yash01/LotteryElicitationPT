@@ -175,6 +175,29 @@ if [[ -n "${LEPT_VENV:-}" && -f "$LEPT_VENV/bin/python" ]]; then
             fail "accelerate not found at ${LEPT_VENV}/bin/accelerate (required for vllm_mode=server)"
         fi
     fi
+
+    LEPT_MODEL_SHARDING="${LEPT_MODEL_SHARDING:-0}"
+    if [[ "$LEPT_MODEL_SHARDING" == "1" ]]; then
+        echo ""
+        echo "--- Model sharding (FSDP) ---"
+        if [[ "$RESOLVED_MODE" != "server" ]]; then
+            fail "LEPT_MODEL_SHARDING=1 requires LEPT_VLLM_MODE=server (resolved mode: $RESOLVED_MODE)"
+        else
+            pass "LEPT_VLLM_MODE compatible with sharding (server)"
+        fi
+        SHARD_CFG="${LEPT_ACCELERATE_CONFIG:-${LEPT_ROOT}/config/accelerate/model-sharding.yaml}"
+        if [[ -f "$SHARD_CFG" ]]; then
+            pass "Accelerate sharding config exists: $SHARD_CFG"
+        else
+            fail "Accelerate sharding config missing: $SHARD_CFG (set LEPT_ACCELERATE_CONFIG or add config/accelerate/model-sharding.yaml)"
+        fi
+        TRAIN_PROCS_CHECK=$((GPU_COUNT - LEPT_VLLM_TP))
+        if [[ "$TRAIN_PROCS_CHECK" -lt 2 ]]; then
+            fail "LEPT_MODEL_SHARDING=1 needs TRAIN_PROCS>=2 (GPUs=$GPU_COUNT, LEPT_VLLM_TP=$LEPT_VLLM_TP → TRAIN_PROCS=$TRAIN_PROCS_CHECK)"
+        else
+            pass "GPU layout allows TRAIN_PROCS=$TRAIN_PROCS_CHECK for FSDP"
+        fi
+    fi
 else
     fail "Cannot run Python checks because LEPT_VENV python is unavailable"
 fi
